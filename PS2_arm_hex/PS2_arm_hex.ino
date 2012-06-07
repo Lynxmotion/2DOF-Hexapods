@@ -1,0 +1,541 @@
+#include <SoftwareSerial.h>
+#include <PS2X_lib.h>
+
+#define DEBUG
+
+#define DBGSerial Serial
+SoftwareSerial SSCSerial(13, 12);
+
+
+//comment to disable the Force Sensitive Resister on the gripper
+//#define FSRG
+
+//FSRG pin Must be analog!!
+#define FSRG_pin A1
+
+//uncomment for digital servos in the Shoulder and Elbow
+//that use a range of 900ms to 2100ms
+//#define DIGITAL_RANGE
+
+//Select which arm by uncommenting the corresponding line
+//#define AL5A
+//#define AL5B
+#define AL5D
+
+#ifdef AL5A
+const float A = 3.75;
+const float B = 4.25;
+#elif defined AL5B
+const float A = 4.75;
+const float B = 5.00;
+#elif defined AL5D
+const float A = 5.75;
+const float B = 7.375;
+#endif
+
+//PS2 pins
+#define DAT 6
+#define CMD 7
+#define ATT 8
+#define CLK 9
+
+//PS2 analog joystick Deadzone
+#define Deadzone 10
+
+//Math constants
+const float rtod = 57.295779;
+const float atop = 11.111;
+
+//Arm Speed Variables
+float Arm_Speed = 1.0;
+int Arm_sps = 3;
+
+//Hexapod Speed Variables
+int Hex_Speed = 100;
+int Hex_sps = 2;
+
+//Gait Variables
+int High = 2000;
+int Middle = 1667;
+int Low = 2000;
+int Height_Setting = 1;
+int Gait_Setting = 1;
+
+//Arm Current Pos
+float X = 4;
+float Y = 4;
+int Z = 1500;
+int G = 1500;
+int WR = 1500;
+float WA = 0;
+
+//Arm temp pos
+float tmpx = 4;
+float tmpy = 4;
+int tmpz = 1500;
+int tmpg = 1500;
+int tmpwr = 1500;
+float tmpwa = 0;
+
+PS2X ps2x;
+
+boolean mode = true;
+
+void setup()
+{
+  DBGSerial.begin(57600);
+  SSCSerial.begin(38400);
+  pinMode(7, INPUT);
+  pinMode(5, OUTPUT);
+  if(!digitalRead(7))
+  {
+    tone(5, 1000, 500);
+    SSCForwarder();
+  }
+  
+  int error = 0;
+  error = ps2x.config_gamepad(CLK,CMD,ATT,DAT, true, true);   //setup pins and settings:  GamePad(clock, command, attention, data, Pressures?, Rumble?) check for error
+  
+#ifdef DEBUG
+  if(error == 0)
+    DBGSerial.println("Found Controller, configured successful");
+   
+  else if(error == 1)
+    DBGSerial.println("No controller found");
+   
+  else if(error == 2)
+    DBGSerial.println("not accepting commands");
+   
+  else if(error == 3)
+    DBGSerial.println("refusing Pressures mode");
+    
+  byte type = 0;
+  type = ps2x.readType(); 
+    switch(type) 
+    {
+      case 0:
+       DBGSerial.println("Unknown");
+       break;
+      case 1:
+       DBGSerial.println("DualShock");
+       break;
+      case 2:
+       DBGSerial.println("GuitarHero");
+       break;
+    }
+#endif 
+  
+  delay(1000);  
+  SSCSerial.println("LH1000 LM1333 LL2000 RH2000 RM1667 RL1000 VS3000");
+  SSCSerial.println("LF1700 LR1300 RF1300 RR1700 HT750");
+  SSCSerial.println("XL0 XR0 XS0");
+}
+
+void SSCForwarder() 
+{
+    delay(2000);
+    int sChar;
+    int sPrevChar;
+    
+    while(digitalRead(7)) {
+        if ((sChar = DBGSerial.read()) != -1) {
+            SSCSerial.write(sChar & 0xff);
+            if (((sChar == '\n') || (sChar == '\r')) && (sPrevChar == '$'))
+                break;    // exit out of the loop
+            sPrevChar = sChar;
+        }
+        
+
+        if ((sChar = SSCSerial.read()) != -1) {
+            DBGSerial.write(sChar & 0xff);
+        }
+    }
+}
+
+int Arm(float x, float y, float z, int g, float wa, int wr) //Here's all the Inverse Kinematics to control the arm
+{
+  float M = sqrt((y*y)+(x*x));
+  if(M <= 0)
+    return 1;
+  float A1 = atan(y/x);
+  if(x <= 0)
+    return 1;
+  float A2 = acos((A*A-B*B+M*M)/((A*2)*M));
+  float Elbow = acos((A*A+B*B-M*M)/((A*2)*B));
+  float Shoulder = A1 + A2;
+  Elbow = Elbow * rtod;
+  Shoulder = Shoulder * rtod;  
+  while((int)Elbow <= 0 || (int)Shoulder <= 0)
+    return 1;
+  float Wrist = abs(wa - Elbow - Shoulder) + 7.50;
+#ifdef DIGITAL_RANGE
+  Elbow = map((180 - Elbow) * atop, 500, 2500, 900, 2100);
+  Shoulder = map(Shoulder*atop + 500, 500, 2500, 900, 2100);
+#else
+  Elbow = (180 - Elbow) * atop;
+  Shoulder = Shoulder * atop + 500;
+#endif
+  Wrist = (180 - Wrist) * atop + 500;
+  SSCSerial.print("#10 P");
+  SSCSerial.println(z);
+  SSCSerial.print(" #11 P");
+  SSCSerial.print(Shoulder);
+  SSCSerial.print(" #12 P");
+  SSCSerial.print(Elbow);
+  SSCSerial.print(" #13 P");
+  SSCSerial.print(Wrist);
+#ifndef FSRG
+  SSCSerial.print(" #14 P");
+  SSCSerial.print(g);
+#endif
+  SSCSerial.print(" #15 P");
+  SSCSerial.print(wr);
+  SSCSerial.println();
+  Y = tmpy;
+  X = tmpx;
+  Z = tmpz;
+  WA = tmpwa;
+#ifndef FSRG
+  G = tmpg;
+#endif
+  WR = tmpwr;
+  return 0;
+}
+
+void Arm_mode()
+{
+  
+  int LSY = 128 - ps2x.Analog(PSS_LY);
+  int LSX = ps2x.Analog(PSS_LX) - 128;
+  int RSY = 128 - ps2x.Analog(PSS_RY);
+  int RSX = ps2x.Analog(PSS_RX) - 128;
+  
+  if(RSY > Deadzone || RSY < -Deadzone)
+    tmpy = max(Y + RSY/1000.0*Arm_Speed, -1);
+  
+  if(RSX > Deadzone || RSX < -Deadzone)
+    tmpx = max(X + RSX/1000.0*Arm_Speed, -0.5);
+    
+  if(LSY > Deadzone || LSY < -Deadzone)
+    tmpwa = constrain(WA + LSY/100.0*Arm_Speed, 0, 180);
+ 
+  if(LSX > Deadzone || LSX < -Deadzone)
+    tmpz = constrain(Z + LSX/10.0*Arm_Speed, 500, 2500);
+ 
+  if(ps2x.Button(PSB_R1))
+  {
+    #ifdef FSRG
+    int gPos;
+    int reading;
+    SSCSerial.println("QP 14");
+    while(SSCSerial.available() == 0)
+      delay(1);
+    gPos = SSCSerial.read() * 10;
+    SSCSerial.println("VC");
+    while(SSCSerial.available() == 0)
+      delay(1);
+    reading = SSCSerial.read();
+    while(reading < 50 && gPos < 2400)
+    {
+      gPos += 10;
+      SSCSerial.print("#14 P");
+      SSCSerial.println(gPos);
+      SSCSerial.println("VC");
+      while(SSCSerial.available() == 0)
+        delay(1);
+      reading = SSCSerial.read()
+    }
+    #else
+    tmpg = constrain(G + 20*Arm_Speed, 500, 2500);
+    #endif
+  }
+  if(ps2x.Button(PSB_R2))
+  {
+    #ifdef FSRG
+    int gPos;
+    SSCSerial.println("QP 14");
+    while(SSCSerial.available() == 0)
+      delay(1);
+    gPos = SSCSerial.read() * 10;
+    while(gPos > 1500)
+    {
+      SSCSerial.print("#14 P");
+      SSCSerial.println(gPos);
+      gPos -= 50;
+    }
+    #else
+    tmpg = constrain(G - 20*Arm_Speed, 1500, 2400);
+    #endif
+  }
+ 
+  if(ps2x.Button(PSB_L1))
+    tmpwr = max(WR + 20*Arm_Speed, 500);
+  else if(ps2x.Button(PSB_L2))
+    tmpwr = min(WR - 20*Arm_Speed, 2500);
+ 
+ 
+  if(ps2x.ButtonPressed(PSB_PAD_UP))
+  {
+    Arm_sps = min(Arm_sps + 1, 5);
+    tone(5, Arm_sps*200, 200);
+  }
+  else if(ps2x.ButtonPressed(PSB_PAD_DOWN))
+  {
+    Arm_sps = max(Arm_sps - 1, 1);
+    tone(5, Arm_sps*200, 200);
+  }
+  
+  Arm_Speed = Arm_sps*0.20 + 0.60;
+      
+ if(Arm(tmpx, tmpy, tmpz, tmpg, tmpwa, tmpwr))
+   {
+     #ifdef DEBUG
+     DBGSerial.print("NONREAL Answer");
+     #endif
+   }
+
+ if(tmpx < 2 && tmpy < 2 && RSX < 0)
+   {
+     tmpy = tmpy + 0.05;
+     Arm(tmpx, tmpy, tmpz, tmpg, tmpwa, tmpwr);
+   }
+ else if(tmpx < 1 && tmpy < 2 && RSY < 0)
+   {
+     tmpx = tmpx + 0.05;
+     Arm(tmpx, tmpy, tmpz, tmpg, tmpwa, tmpwr);
+   }
+ 
+}
+
+void Gait_Set()
+{
+  SSCSerial.print("LH");
+  SSCSerial.print(3000 - High);
+  SSCSerial.print(" LM");
+  SSCSerial.print(3000 - Middle);
+  SSCSerial.print(" LL");
+  SSCSerial.print(3000 - Low);
+  SSCSerial.print(" RH");
+  SSCSerial.print(High);
+  SSCSerial.print(" RM");
+  SSCSerial.print(Middle);
+  SSCSerial.print(" RL");
+  SSCSerial.print(Low);
+  SSCSerial.println(" VS3000");
+}
+  
+  
+  
+void Hex_mode()
+{
+  int LSY = (256 - ps2x.Analog(PSS_LY))/256.0 * 200 - 100;
+  int RSY = (256 - ps2x.Analog(PSS_RY))/256.0 * 200 - 100;
+  
+  if(LSY > Deadzone || LSY < -Deadzone || RSY > Deadzone || RSY < -Deadzone)
+  {
+    SSCSerial.print("XL");
+    SSCSerial.print(LSY);
+    SSCSerial.print(" XR");
+    SSCSerial.print(RSY);
+    SSCSerial.print(" XS");
+    SSCSerial.println(Hex_Speed);
+  }
+  else
+    SSCSerial.println("XL0 XR0 XS0");
+    
+  if(ps2x.ButtonPressed(PSB_BLUE))
+  {
+
+    High = 2000;
+    Middle = 1667;
+    Low = 1000;
+    Gait_Set();
+    Gait_Setting = 1;
+  }
+  else if(ps2x.ButtonPressed(PSB_RED))
+  {
+    High = 2100;
+    Middle = 1700;
+    Low = 900;
+    Gait_Set();
+    Gait_Setting = 2;
+  }
+  else if(ps2x.ButtonPressed(PSB_GREEN))
+  {
+    High = 2500;
+    Middle = 1000;
+    Low = 1000;
+    Gait_Set();
+    Gait_Setting = 3;
+  }
+  else if(ps2x.ButtonPressed(PSB_PINK))
+  {
+    High = 2500;
+    Middle = 2500;
+    Low = 500;
+    Gait_Set();
+    Gait_Setting = 4;
+  }
+  
+  if(ps2x.ButtonPressed(PSB_PAD_UP))
+  {
+    if(Gait_Setting == 1)
+    {
+      Low = Low - 200;
+      if(Low < 1000)
+        Low = 1000;
+      else
+      {
+        Middle = (High - Low) * 2 / 3 + Low;
+        Gait_Set();
+        SSCSerial.println("XL0 XR0 XS200");
+      }
+    }
+    else if(Gait_Setting == 2)
+    {
+      Low = Low - 200;
+      if(Low < 900)
+        Low = 900;
+      else
+      {
+        Middle = (High - Low) / 3 + Low;
+        Gait_Set();
+        SSCSerial.println("XL0 XR0 XS200");
+      }
+    } 
+    else if(Gait_Setting == 3)
+    {
+      Low = Low - 200;
+      if(Low < 1000)
+        Low = 1000;
+      else
+      {
+        Middle = Low;
+        Gait_Set();
+        SSCSerial.println("XL0 XR0 XS200");
+      }
+    }
+    else if(Gait_Setting == 4)
+    {
+      Low = Low - 200;
+      if(Low < 500)
+        Low = 500;
+      else
+      {
+        Gait_Set();
+        SSCSerial.println("XL0 XR0 XS200");
+      }
+    }
+  }
+  if(ps2x.ButtonPressed(PSB_PAD_DOWN))
+  {
+    if(Gait_Setting == 1)
+    {
+      Low = Low + 200;
+      if(Low > 1800)
+        Low = 1800;
+      else
+      {
+        Middle = (High - Low) * 2 / 3 + Low;
+        Gait_Set();
+        SSCSerial.println("XL0 XR0 XS200");
+      }
+    }
+    else if(Gait_Setting == 2)
+    {
+      Low = Low + 200;
+      if(Low > 2100)
+        Low = 2100;
+      else
+      {
+        Middle = (High - Low) / 3 + Low;
+        Gait_Set();
+        SSCSerial.println("XL0 XR0 XS200");
+      }
+    } 
+    else if(Gait_Setting == 3)
+    {
+      Low = Low + 200;
+      if(Low > 1800)
+        Low = 1800;
+      else
+      {
+        Middle = Low;
+        Gait_Set();
+        SSCSerial.println("XL0 XR0 XS200");
+      }
+    }
+    else if(Gait_Setting == 4)
+    {
+      Low = Low + 200;
+      if(Low > 2300)
+        Low = 2000;
+      else
+      {  
+        Gait_Set();
+        SSCSerial.println("XL0 XR0 XS200");
+      }
+    }
+  }
+  
+  if(ps2x.ButtonPressed(PSB_PAD_RIGHT))
+  {
+    Hex_sps = Hex_sps + 1;
+    if(Hex_sps > 5)
+      Hex_sps = 5;
+    tone(5, Hex_sps*500, 200);
+  }
+  else if(ps2x.ButtonPressed(PSB_PAD_LEFT))
+  {
+    Hex_sps = Hex_sps - 1;
+    if(Hex_sps < 1)
+      Hex_sps = 1;
+    tone(5, Hex_sps*500, 200);
+  }  
+  
+  Hex_Speed = Hex_sps*25 + 50;
+}
+
+void Tripod_Down()
+{
+  SSCSerial.print("#0 P");
+  SSCSerial.print(3000 - High);
+  SSCSerial.print(" #2 P");
+  SSCSerial.print(3000 - High);
+  SSCSerial.print(" #4 P");
+  SSCSerial.print(3000 - High);
+  SSCSerial.print(" #16 P");
+  SSCSerial.print(High);
+  SSCSerial.print(" #18 P");
+  SSCSerial.print(High);
+  SSCSerial.print(" #20 P");
+  SSCSerial.println(High);
+}
+
+void loop()
+{
+  ps2x.read_gamepad(); //update the ps2 controller
+  
+  if(ps2x.ButtonPressed(PSB_SELECT))
+  {
+    mode = !mode;    
+    if(!mode)
+    {
+      SSCSerial.println("XSTOP");
+      Tripod_Down();  
+    }
+    else if(mode)
+    {
+      SSCSerial.println("XL0 XR0 XS200");
+      delay(500);
+    }
+  }
+
+  
+  if(mode)
+    Hex_mode();
+  else
+    Arm_mode();
+    
+  delay(30);
+}
